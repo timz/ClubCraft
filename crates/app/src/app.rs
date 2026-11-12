@@ -296,7 +296,8 @@ impl App {
             }
         }
         if self.eng.preview_player.is_none() { self.sh.preview.item = None; }
-        self.sh.preview.output = self.prefs.preview_output;
+        self.sh.preview.output = if self.eng.preview_player.is_some() { self.eng.preview_output }
+            else { self.eng.handle.as_ref().map(|h| crate::preview::target_output(self.prefs.preview_output, &h.audio_config(), &h.stream_info())).unwrap_or(self.prefs.preview_output) };
         self.sh.preview.loading = self.eng.preview_player.is_some() && self.eng.state().preview.waiting;
         // the track a preview would start on, loaded ahead so Space plays at once
         if self.view == View::Studio && self.eng.studio_player.is_none() {
@@ -452,7 +453,6 @@ impl App {
         let p = self.prefs.clone();
         let first = self.applied_prefs.is_none();
         if self.applied_prefs.as_ref().is_some_and(|old| old.preview_output != p.preview_output) { self.stop_preview(); }
-        self.sh.preview.output = p.preview_output;
         crate::theme::set_key_notation(p.key_notation);
         crate::theme::set_soft_stems(p.soft_stem_colors);
         if first || self.applied_prefs.as_ref().map(|o| o.accent) != Some(p.accent) {
@@ -671,6 +671,7 @@ impl App {
     fn start_preview(&mut self, mix: &clubcraft_core::Mix, from: f64, item: crate::preview::PreviewItem) {
         match self.eng.play_preview(mix, from, &self.sh) {
             Ok(()) => {
+                self.sh.preview.output = self.eng.preview_output;
                 self.sh.preview.item = Some(item);
                 self.sh.preview.mix_serial = self.studio.mix_serial;
                 self.sh.preview.mashup_revision = self.studio.mashup.revision;
@@ -699,7 +700,6 @@ impl App {
 
     fn reconcile_preview(&mut self) {
         use crate::preview::PreviewSource as P;
-        self.sh.preview.main_output = self.eng.handle.as_ref().is_some_and(|h| h.audio_config().headphones == clubcraft_engine::HeadphoneRouting::MainOutput);
         let Some(item) = self.sh.preview.item else { return; };
         let visible = match item.source {
             P::Library { playlist, mix } => self.view == View::Library && playlist == self.library.playlist && mix == self.library.mix,

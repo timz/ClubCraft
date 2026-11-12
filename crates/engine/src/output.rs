@@ -220,8 +220,8 @@ pub(crate) fn alignment(offset_ns: f64, correction_ms: f64, sr: u32) -> (f64, f6
 }
 
 /// Physical-output protection is deliberately downstream of the recorded master bus.
-pub(crate) fn mix_shared_output(master: &[f32], cue: &[f32], output: &mut [f32], limiter: &mut crate::dsp::Limiter) {
-    for ((out, master), cue) in output.iter_mut().zip(master).zip(cue) { *out = master + cue; }
+pub(crate) fn mix_speaker_preview(master: &[f32], preview: &[f32], output: &mut [f32], limiter: &mut crate::dsp::Limiter) {
+    for ((out, master), preview) in output.iter_mut().zip(master).zip(preview) { *out = master + preview; }
     limiter.process(output);
 }
 
@@ -676,12 +676,12 @@ mod tests {
     }
 
     #[test]
-    fn shared_physical_output_sums_buses_and_limits_without_modifying_recorded_master() {
+    fn speaker_preview_is_limited_after_the_recorded_master_bus() {
         let master = vec![0.7; 512];
         let cue = vec![0.6; 512];
         let mut output = vec![0.0; 512];
         let mut limiter = crate::dsp::Limiter::new(44100.0);
-        for _ in 0..10 { mix_shared_output(&master, &cue, &mut output, &mut limiter); }
+        for _ in 0..10 { mix_speaker_preview(&master, &cue, &mut output, &mut limiter); }
         assert!(output.iter().all(|v| v.is_finite() && v.abs() <= 1.0));
         assert!(output.iter().any(|v| *v > 0.7));
         assert!(master.iter().all(|v| *v == 0.7));

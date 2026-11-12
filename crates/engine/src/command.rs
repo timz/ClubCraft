@@ -25,14 +25,16 @@ pub enum EqBand {
 /// Destination of the independent browser preview.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PreviewOutput {
-    Headphones,
     #[default]
+    Auto,
+    Headphones,
+    /// Physical main output only, downstream of the recorded master bus.
     Master,
 }
 
 impl PreviewOutput {
     pub fn label(self) -> &'static str {
-        match self { Self::Headphones => "Headphones", Self::Master => "Master" }
+        match self { Self::Auto => "Auto", Self::Headphones => "Headphones", Self::Master => "Main output" }
     }
 }
 

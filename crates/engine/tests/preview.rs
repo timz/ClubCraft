@@ -132,17 +132,7 @@ fn preview_does_not_change_live_or_studio_mix_or_decks() {
                 }
                 let (actual, _) = block(&mut core);
                 let (expected, _) = block(&mut reference);
-                if output == PreviewOutput::Headphones {
-                    assert_eq!(actual, expected, "master samples remain identical");
-                } else if i == 0 {
-                    assert!(
-                        actual
-                            .iter()
-                            .zip(&expected)
-                            .any(|(a, b)| (a - b).abs() > 0.01),
-                        "master mode sums preview over the running mix"
-                    );
-                }
+                assert_eq!(actual, expected, "preview never changes master samples");
                 let a = core.snapshot();
                 let b = reference.snapshot();
                 let mut main_state = a.mix;
@@ -156,24 +146,25 @@ fn preview_does_not_change_live_or_studio_mix_or_decks() {
 }
 
 #[test]
-fn master_preview_is_recorded_and_obeys_master_volume() {
+fn main_output_preview_is_separate_from_master_cue_and_recording() {
     let t = audio();
     let mut core = EngineCore::new(SR, 2);
+    core.apply(Command::SetMasterGain(-80.0));
     let _p = start(&mut core, PreviewOutput::Master, &t);
     let (producer, mut recorded) = rtrb::RingBuffer::new(FRAMES * 4);
     core.apply(Command::SetRecorder(Some(producer)));
-    let (m, _) = block(&mut core);
-    assert!(m.iter().any(|v| v.abs() > 0.01));
-    for sample in &m {
-        assert_eq!(recorded.pop().unwrap(), *sample);
-    }
-    core.apply(Command::SetMasterGain(-80.0));
-    for _ in 0..100 {
-        block(&mut core);
-        while recorded.pop().is_ok() {}
-    }
-    let (m, _) = block(&mut core);
-    assert!(m.iter().all(|v| v.abs() < 0.0002));
+    let (m, c, p) = outputs(&mut core);
+    assert!(m.iter().chain(&c).all(|v| *v == 0.0));
+    assert!(p.iter().any(|v| v.abs() > 0.01));
+    for sample in &m { assert_eq!(recorded.pop().unwrap(), *sample); }
+}
+
+fn outputs(core: &mut EngineCore) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let mut m = vec![0.0; FRAMES * 2];
+    let mut c = m.clone();
+    let mut p = m.clone();
+    core.process_outputs(&mut m, &mut c, &mut p);
+    (m, c, p)
 }
 
 #[test]
@@ -299,9 +290,9 @@ fn replacing_a_headphone_preview_with_a_silent_master_preview_leaks_no_tail() {
         .with_grid(BeatGrid::new(120.0, 0.0)),
     );
     let _q = start(&mut core, PreviewOutput::Master, &silent);
-    let (master, _) = block(&mut core);
+    let (master, _, preview) = outputs(&mut core);
     assert!(
-        master.iter().all(|v| *v == 0.0),
+        master.iter().chain(&preview).all(|v| *v == 0.0),
         "old headphone audio must not escape through filter history"
     );
 }
@@ -341,29 +332,50 @@ fn main_transport_cannot_stop_the_preview() {
 fn main_output_preview_has_independent_volume_and_never_enters_recording() {
     for gain in [-60.0, 0.0, 12.0] {
         let mut core = EngineCore::new(SR, 2);
-        core.set_shared_output(true);
         core.apply(Command::SetMasterGain(gain));
         core.apply(Command::SetHeadphoneMix(1.0));
         let t = audio();
-        // Also verifies migration of the old Master preview preference.
         let _p = start(&mut core, PreviewOutput::Master, &t);
         let (producer, mut recorded) = rtrb::RingBuffer::new(FRAMES * 4);
         core.apply(Command::SetRecorder(Some(producer)));
-        let (master, cue) = block(&mut core);
-        assert!(master.iter().all(|v| *v == 0.0));
-        assert!(cue.iter().any(|v| v.abs() > 0.01));
+        let (master, cue, preview) = outputs(&mut core);
+        assert!(master.iter().chain(&cue).all(|v| *v == 0.0));
+        assert!(preview.iter().any(|v| v.abs() > 0.01));
         while let Ok(sample) = recorded.pop() { assert_eq!(sample, 0.0); }
     }
     let t = audio();
     let mut loud = EngineCore::new(SR, 2);
     let mut quiet = EngineCore::new(SR, 2);
-    loud.set_shared_output(true);
-    quiet.set_shared_output(true);
     quiet.apply(Command::SetHeadphoneGain(-20.0));
     let _a = start(&mut loud, PreviewOutput::Master, &t);
     let _b = start(&mut quiet, PreviewOutput::Master, &t);
-    let (_, a) = block(&mut loud);
-    let (_, b) = block(&mut quiet);
+    let (_, _, a) = outputs(&mut loud);
+    let (_, _, b) = outputs(&mut quiet);
     let energy = |x: &[f32]| x.iter().map(|v| v * v).sum::<f32>();
     assert!((energy(&b) / energy(&a) - 0.01).abs() < 0.002);
+}
+
+#[test]
+fn deck_cue_cannot_enter_the_speaker_preview_bus() {
+    let mut core = EngineCore::new(SR, 4);
+    core.apply(Command::SetMasterGain(-80.0));
+    core.apply(Command::LoadTrack(0, audio()));
+    core.apply(Command::Play(0));
+    core.apply(Command::SetPfl(0, true));
+    let _p = start(&mut core, PreviewOutput::Master, &audio());
+    for _ in 0..10 { outputs(&mut core); }
+    core.apply(Command::PreviewStop);
+    for blend in [0.0, 0.5, 1.0] {
+        core.apply(Command::SetHeadphoneMix(blend));
+        let (_, _, preview) = outputs(&mut core);
+        assert!(preview.iter().all(|v| *v == 0.0), "CUE is never a speaker preview");
+    }
+}
+
+#[test]
+fn offline_render_does_not_include_speaker_previews() {
+    let mut core = EngineCore::new(SR, 2);
+    let _p = start(&mut core, PreviewOutput::Master, &audio());
+    let (master, cue) = block(&mut core);
+    assert!(master.iter().chain(&cue).all(|v| *v == 0.0));
 }

@@ -30,14 +30,13 @@ pub struct PreviewItem {
 pub struct PreviewState {
     pub item: Option<PreviewItem>,
     pub output: PreviewOutput,
-    pub main_output: bool,
     pub loading: bool,
     pub mix_serial: u64,
     pub mashup_revision: u64,
 }
 
 impl PreviewState {
-    pub fn output_label(&self) -> &'static str { if self.main_output { "Main output" } else { self.output.label() } }
+    pub fn output_label(&self) -> &'static str { self.output.label() }
     pub fn playing(&self, source: PreviewSource, track: TrackId, row: usize) -> bool {
         self.item == Some(PreviewItem { source, track, row })
     }
@@ -68,6 +67,34 @@ impl PreviewState {
                 format!("Preview in {} from the first drop", self.output_label())
             })
     }
+}
+
+/// Auto uses the running endpoint; a configured but failed headphone route is never a speaker fallback.
+pub fn target_output(preference: PreviewOutput, config: &clubcraft_engine::AudioConfig, info: &clubcraft_engine::StreamInfo) -> PreviewOutput {
+    use clubcraft_engine::HeadphoneRouting as H;
+    if preference != PreviewOutput::Auto { return preference; }
+    if info.cue_channels.is_some() || matches!(config.headphones, H::SeparateDevice | H::Channels { .. } | H::Split) {
+        PreviewOutput::Headphones
+    } else {
+        PreviewOutput::Master
+    }
+}
+
+pub fn output_available(output: PreviewOutput, info: &clubcraft_engine::StreamInfo) -> bool {
+    match output {
+        PreviewOutput::Auto => false,
+        PreviewOutput::Master => !info.master.failed,
+        PreviewOutput::Headphones => headphones_available(info),
+    }
+}
+
+pub fn resolve_output(preference: PreviewOutput, config: &clubcraft_engine::AudioConfig, info: &clubcraft_engine::StreamInfo) -> anyhow::Result<PreviewOutput> {
+    let output = target_output(preference, config, info);
+    if info.master.failed { anyhow::bail!("Audio output is unavailable. Apply audio settings to retry."); }
+    if output == PreviewOutput::Headphones && !headphones_available(info) {
+        anyhow::bail!("Headphone output is unavailable. Configure Audio output in Settings.");
+    }
+    Ok(output)
 }
 
 pub fn headphones_available(info: &clubcraft_engine::StreamInfo) -> bool {
@@ -158,6 +185,43 @@ mod tests {
             master_delay_ms: 0.0,
             cue_delay_ms: 0.0,
         }
+    }
+
+    #[test]
+    fn automatic_output_uses_running_routes_and_never_falls_back_from_a_failed_route() {
+        use clubcraft_engine::{AudioConfig, HeadphoneRouting as H};
+        let mut info = output();
+        let mut cfg = AudioConfig::default();
+        assert_eq!(cfg.headphones, H::Auto);
+        assert_eq!(resolve_output(PreviewOutput::Auto, &cfg, &info).unwrap(), PreviewOutput::Master);
+        assert!(resolve_output(PreviewOutput::Headphones, &cfg, &info).is_err());
+        info.cue_channels = Some([2, 3]);
+        assert_eq!(resolve_output(PreviewOutput::Auto, &cfg, &info).unwrap(), PreviewOutput::Headphones);
+        info.headphones = Some(info.master.clone());
+        info.headphones.as_mut().unwrap().failed = true;
+        assert!(resolve_output(PreviewOutput::Auto, &cfg, &info).is_err());
+        info = output();
+        cfg.headphones = H::SeparateDevice;
+        assert!(resolve_output(PreviewOutput::Auto, &cfg, &info).is_err());
+        // Legacy shared output has no headphone endpoint and cannot carry deck CUE.
+        cfg.headphones = H::MainOutput;
+        assert_eq!(resolve_output(PreviewOutput::Auto, &cfg, &info).unwrap(), PreviewOutput::Master);
+        info.master.failed = true;
+        assert!(resolve_output(PreviewOutput::Auto, &cfg, &info).is_err());
+    }
+
+    #[test]
+    fn loss_does_not_retarget_an_active_or_loading_preview() {
+        use clubcraft_engine::AudioConfig;
+        let cfg = AudioConfig::default();
+        let mut info = output();
+        info.cue_channels = Some([2, 3]);
+        let active = resolve_output(PreviewOutput::Auto, &cfg, &info).unwrap();
+        assert_eq!(active, PreviewOutput::Headphones);
+        info.cue_channels = None;
+        assert!(!output_available(active, &info));
+        // Only a new request on a running stereo fallback can resolve to speakers.
+        assert_eq!(resolve_output(PreviewOutput::Auto, &cfg, &info).unwrap(), PreviewOutput::Master);
     }
 
     #[test]

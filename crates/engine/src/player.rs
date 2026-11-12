@@ -411,7 +411,10 @@ pub struct PreviewSink<'a> {
 impl CommandSink for PreviewSink<'_> {
     fn submit(&mut self, cmd: Command) -> Result<()> {
         let cmd = match cmd {
-            Command::PlayMix { schedule, start } => Command::PreviewPlay { schedule, start, output: self.output },
+            Command::PlayMix { schedule, start } => {
+                if self.output == crate::command::PreviewOutput::Auto { return Err(anyhow!("resolve automatic preview output before starting playback")); }
+                Command::PreviewPlay { schedule, start, output: self.output }
+            },
             Command::MixStop => Command::PreviewStop,
             Command::MixSeek(t) => Command::PreviewSeek(t),
             Command::MixPause => Command::PreviewPause,

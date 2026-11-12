@@ -30,7 +30,7 @@ fn output_channels(devices: &[DeviceInfo], id: Option<&str>) -> u16 {
 }
 
 fn master_pair(cfg: &AudioConfig) -> [u16; 2] {
-    match cfg.headphones { HeadphoneRouting::Channels { master, .. } => master, _ => cfg.master_pair }
+    match cfg.headphones { HeadphoneRouting::Channels { master, .. } => master, HeadphoneRouting::Auto | HeadphoneRouting::Split => [0, 1], _ => cfg.master_pair }
 }
 
 fn cue_pair(cfg: &AudioConfig) -> [u16; 2] {
@@ -265,6 +265,21 @@ impl Settings {
         }
     }
 
+    fn discard_audio_draft(&mut self, prefs: &Prefs) {
+        self.audio_draft = self.audio.clone();
+        self.preview_draft = Some(prefs.preview_output);
+    }
+
+    fn apply_audio_draft(&mut self, prefs: &mut Prefs, open: impl FnOnce(&AudioConfig) -> anyhow::Result<AudioConfig>) -> anyhow::Result<()> {
+        let audio = open(&self.audio_draft)?;
+        let preview = self.preview_draft.unwrap_or(prefs.preview_output);
+        self.sync_audio(audio);
+        prefs.preview_output = preview;
+        self.preview_draft = Some(preview);
+        self.stop_preview = true;
+        Ok(())
+    }
+
     fn audio_ui(&mut self, ui: &mut egui::Ui, handle: Option<&EngineHandle>, prefs: &mut Prefs) {
         use clubcraft_engine::command::PreviewOutput;
         if self.devices.is_empty() {
@@ -288,36 +303,39 @@ impl Settings {
             channel_pair(ui, "master_channels", &mut master, output_channels(&self.devices, cfg.device.as_deref()), None);
             ui.end_row();
         });
-        section(ui, "Preview / headphones");
-        // Legacy Master preferences are displayed as Main output and converted only on Apply.
-        let legacy_main = preview == PreviewOutput::Master;
-        if legacy_main { cfg.headphones = HeadphoneRouting::MainOutput; }
-        egui::Grid::new("preview_output").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-            ui.label("Device");
+        let previous_routing = cfg.headphones;
+        section(ui, "Headphones");
+        egui::Grid::new("headphone_output").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            ui.label("Routing / device");
             let label = match cfg.headphones {
-                HeadphoneRouting::MainOutput | HeadphoneRouting::Off => "Main output".into(),
+                HeadphoneRouting::Auto => "Auto (outputs 3/4 if available)".into(),
+                HeadphoneRouting::Off => "Off".into(),
+                HeadphoneRouting::MainOutput => "Off (legacy Main output)".into(),
+                HeadphoneRouting::Split => "Split cable (master L / cue R)".into(),
                 HeadphoneRouting::SeparateDevice => device_label(&self.devices, cfg.headphone_device.as_deref(), "Select device..."),
-                HeadphoneRouting::Split => "Split cable (saved configuration)".into(),
-                _ => device_label(&self.devices, cfg.device.as_deref(), "System default"),
+                HeadphoneRouting::Channels { .. } => "Channel pairs on master device".into(),
             };
-            egui::ComboBox::from_id_salt("preview_device").width(300.0).selected_text(label).show_ui(ui, |ui| {
-                if ui.selectable_label(matches!(cfg.headphones, HeadphoneRouting::MainOutput | HeadphoneRouting::Off), "Main output").clicked() {
-                    cfg.headphones = HeadphoneRouting::MainOutput;
-                    preview = PreviewOutput::Headphones;
+            egui::ComboBox::from_id_salt("headphone_device").width(300.0).selected_text(label).show_ui(ui, |ui| {
+                ui.selectable_value(&mut cfg.headphones, HeadphoneRouting::Auto, "Auto (outputs 3/4 if available)");
+                ui.selectable_value(&mut cfg.headphones, HeadphoneRouting::Off, "Off");
+                ui.selectable_value(&mut cfg.headphones, HeadphoneRouting::Split, "Split cable (master L / cue R)");
+                if ui.add_enabled(output_channels(&self.devices, cfg.device.as_deref()) >= 4,
+                    egui::Button::selectable(matches!(cfg.headphones, HeadphoneRouting::Channels { .. }), "Channel pairs on master device")).clicked() {
+                    cfg.headphones = HeadphoneRouting::Channels { master, cue: [2, 3] };
+                    cue = [2, 3];
                 }
                 for d in &self.devices {
                     let same = cfg.device.as_deref().map_or(d.is_default, |id| d.id == id || d.name == id);
-                    let selected = if same { matches!(cfg.headphones, HeadphoneRouting::Channels { .. } | HeadphoneRouting::Auto | HeadphoneRouting::Split) }
-                        else { cfg.headphones == HeadphoneRouting::SeparateDevice && cfg.headphone_device.as_deref() == Some(&d.id) };
-                    if ui.add_enabled(!d.id.is_empty() && (!same || d.max_channels >= 4), egui::Button::selectable(selected, device_choice(d, &self.devices))).clicked() {
-                        preview = PreviewOutput::Headphones;
-                        if same { cfg.headphones = HeadphoneRouting::Channels { master, cue: [2, 3] }; cue = [2, 3]; }
-                        else { cfg.headphones = HeadphoneRouting::SeparateDevice; cfg.headphone_device = Some(d.id.clone()); cue = [0, 1]; }
+                    let selected = cfg.headphones == HeadphoneRouting::SeparateDevice && cfg.headphone_device.as_deref() == Some(&d.id);
+                    if ui.add_enabled(!d.id.is_empty() && !same, egui::Button::selectable(selected, device_choice(d, &self.devices))).clicked() {
+                        cfg.headphones = HeadphoneRouting::SeparateDevice;
+                        cfg.headphone_device = Some(d.id.clone());
+                        cue = [0, 1];
                     }
                 }
             });
             ui.end_row();
-            if !matches!(cfg.headphones, HeadphoneRouting::MainOutput | HeadphoneRouting::Off | HeadphoneRouting::Split) {
+            if matches!(cfg.headphones, HeadphoneRouting::SeparateDevice | HeadphoneRouting::Channels { .. }) {
                 ui.label("Channels");
                 let separate = cfg.headphones == HeadphoneRouting::SeparateDevice;
                 let channels = output_channels(&self.devices, if separate { cfg.headphone_device.as_deref() } else { cfg.device.as_deref() });
@@ -325,16 +343,28 @@ impl Settings {
                 ui.end_row();
             }
         });
-        if let HeadphoneRouting::Channels { .. } | HeadphoneRouting::Auto = cfg.headphones {
+        if cfg.headphones != previous_routing && matches!(cfg.headphones, HeadphoneRouting::Auto | HeadphoneRouting::Split) {
+            master = [0, 1];
+            cue = if cfg.headphones == HeadphoneRouting::Auto { [2, 3] } else { [0, 1] };
+        }
+        if matches!(cfg.headphones, HeadphoneRouting::Channels { .. }) {
+            cfg.headphones = HeadphoneRouting::Channels { master, cue };
+        }
+        // Auto and Split have fixed master channels; selecting another pair explicitly leaves those modes.
+        if matches!(cfg.headphones, HeadphoneRouting::Auto | HeadphoneRouting::Split) && master != [0, 1] {
             cfg.headphones = HeadphoneRouting::Channels { master, cue };
         }
         cfg.master_pair = master;
         cfg.headphone_pair = cue;
-        if matches!(cfg.headphones, HeadphoneRouting::MainOutput | HeadphoneRouting::Off) {
-            hint(ui, "MASTER controls the main mix; PHONES controls previews and headphone cue. Only the main mix is recorded.");
-        } else {
-            hint(ui, "Shared output for list previews and deck headphone buttons. A disconnected output never falls back to master.");
-        }
+        section(ui, "Preview");
+        ui.horizontal(|ui| {
+            ui.label("Preview output");
+            for output in [PreviewOutput::Auto, PreviewOutput::Headphones, PreviewOutput::Master] {
+                ui.selectable_value(&mut preview, output, output.label());
+            }
+        });
+        hint(ui, "Auto uses headphones when configured, otherwise the main output. Deck CUE never goes to the speakers. Previews are never recorded; PHONES controls their volume.");
+        if preview == PreviewOutput::Master { ui.colored_label(theme::WARN, "Main output previews are audible to the audience."); }
         if ui.small_button("Rescan devices").clicked() { self.devices = clubcraft_engine::devices().unwrap_or_default(); }
         ui.collapsing("Advanced audio settings", |ui| {
             egui::Grid::new("audio_advanced").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
@@ -391,33 +421,29 @@ impl Settings {
         self.audio_draft = cfg.clone();
         ui.horizontal(|ui| {
             if ui.button("Apply").clicked() {
-                if cfg == self.audio {
-                    self.stop_preview = true;
-                    prefs.preview_output = PreviewOutput::Headphones;
-                    self.preview_draft = Some(PreviewOutput::Headphones);
-                    self.message = "Audio output changed".into();
-                } else if let Some(h) = handle {
-                    match h.set_audio_config(cfg) {
-                        Ok(()) => {
-                            self.sync_audio(h.audio_config());
-                            self.stop_preview = true;
-                            prefs.preview_output = PreviewOutput::Headphones;
-                            self.preview_draft = Some(PreviewOutput::Headphones);
-                            self.message = "Audio output changed".into();
+                let previous = self.audio.clone();
+                let result = self.apply_audio_draft(prefs, |cfg| {
+                    if let Some(h) = handle {
+                        // A preview-only change need not restart a healthy, unchanged stream.
+                        let info = h.stream_info();
+                        if *cfg != previous || h.audio_config() != *cfg || info.master.failed
+                            || info.headphones.as_ref().is_some_and(|h| h.failed)
+                            || (cfg.headphones == HeadphoneRouting::SeparateDevice && info.cue_channels.is_none()) {
+                            h.set_audio_config(cfg.clone())?;
                         }
-                        Err(e) => self.message = format!("Audio: {e:#}"),
+                        Ok(h.audio_config())
+                    } else { Ok(cfg.clone()) }
+                });
+                match result {
+                    Ok(()) => {
+                        self.restart_audio = handle.is_none();
+                        self.message = "Audio output changed".into();
                     }
-                } else {
-                    self.audio = cfg;
-                    self.stop_preview = true;
-                    prefs.preview_output = PreviewOutput::Headphones;
-                    self.preview_draft = Some(PreviewOutput::Headphones);
-                    self.restart_audio = true;
+                    Err(e) => self.message = format!("Audio: {e:#}"),
                 }
             }
             if ui.add_enabled(self.audio_draft != self.audio || preview != prefs.preview_output, egui::Button::new("Discard changes")).clicked() {
-                self.audio_draft = self.audio.clone();
-                self.preview_draft = Some(prefs.preview_output);
+                self.discard_audio_draft(prefs);
             }
         });
     }
@@ -794,4 +820,39 @@ fn export_ui(ui: &mut Ui, p: &mut Prefs) {
         }
     });
     hint(ui, &format!("Recordings go to {}", clubcraft_core::paths::recordings_dir().display()));
+}
+
+#[cfg(test)]
+mod audio_tests {
+    use super::*;
+    use clubcraft_engine::command::PreviewOutput;
+
+    #[test]
+    fn failed_apply_keeps_running_settings_and_preview_and_discard_restores_drafts() {
+        let mut settings = Settings::new(AudioConfig::default(), None);
+        let mut prefs = Prefs::default();
+        let old = settings.audio.clone();
+        settings.audio_draft.headphones = HeadphoneRouting::SeparateDevice;
+        settings.preview_draft = Some(PreviewOutput::Master);
+        assert!(settings.apply_audio_draft(&mut prefs, |_| anyhow::bail!("device unavailable")).is_err());
+        assert_eq!(settings.audio, old);
+        assert_eq!(prefs.preview_output, PreviewOutput::Auto);
+        assert!(!settings.stop_preview);
+        settings.discard_audio_draft(&prefs);
+        assert_eq!(settings.audio_draft, old);
+        assert_eq!(settings.preview_draft, Some(PreviewOutput::Auto));
+    }
+
+    #[test]
+    fn successful_apply_commits_both_drafts_and_stops_preview() {
+        let mut settings = Settings::new(AudioConfig::default(), None);
+        let mut prefs = Prefs::default();
+        settings.audio_draft.headphones = HeadphoneRouting::Off;
+        settings.preview_draft = Some(PreviewOutput::Master);
+        settings.apply_audio_draft(&mut prefs, |cfg| Ok(cfg.clone())).unwrap();
+        assert_eq!(settings.audio.headphones, HeadphoneRouting::Off);
+        assert_eq!(prefs.preview_output, PreviewOutput::Master);
+        assert!(settings.stop_preview);
+        assert_eq!(settings.audio, settings.audio_draft);
+    }
 }

@@ -119,29 +119,36 @@ alignment accuracy.
 
 ## Browser previews
 
-Settings > Audio output contains Master and Preview / headphones sections, with a device
-and channel pair for each output. Main output uses the master's physical device and channels
-while keeping MASTER and PHONES volumes independent. List previews and selected deck CUE
-are summed with master only at the physical output, after recording, with a final limiter.
-CUE/MIX is unavailable in this mode, so master is never added twice. Deck CUE can make an
-already audible deck louder; all monitoring on this output is audible to the audience.
-New installations use Main output by default. Existing settings are preserved until Apply.
-Selecting a separate device supports its available stereo channel pairs; on the same device,
-master and cue pairs must not overlap. No setting silently moves the master channel pair.
+Settings > Audio output keeps Master and Headphones routing separate from Preview output.
+Headphones offers Auto (the default: master 1/2 and cue 3/4 when available), Off, Split cable,
+channel pairs on the master device, and a separate device. Channel pairs must not overlap.
+The legacy MainOutput routing remains readable but has no physical deck CUE output.
 Sample rate, buffer and alignment correction are under Advanced audio settings.
-Changes apply together with Apply; failed changes preserve the running output and preview
-routing. Discard restores saved selections. Successful Apply stops any active preview.
-A disconnected headphone output never falls back to master. These settings apply to Library,
-Studio Playlist and Mashups, Add tracks, and the Live browser and Automix queue.
 
-Previews have their own two private decks and conductor. They never stop or reuse the main
-Studio or Live decks. Headphone previews are added after Cue/Master blending, before the
-headphone gain and overload protection; they never enter the master or its recording.
-Master previews are summed before master gain and limiting, and are included in recordings.
-Offline project exports do not include previews. A missing or failed headphone output stops
-or rejects the preview without falling back to master. Leaving the source screen/list stops
-its preview. Track previews start at the first analysed drop, otherwise a third into the
-track, at native tempo and key.
+Preview output offers Auto / Headphones / Main output. Auto selects the running headphone
+route when configured, otherwise the physical main output. A configured but unavailable
+headphone route rejects playback, including a separate-device startup with master only.
+An active preview's destination is fixed; headphone failure stops it without speaker fallback.
+A new preview after a system-default startup fallback uses that running configuration.
+Preferences older than version 4 migrate the preview choice once to Auto, without changing
+the saved device configuration. Later explicit preview choices are preserved.
+
+Changes apply together with Apply; failed changes preserve the running configuration and
+preview preference. Discard restores saved selections. Successful Apply stops any preview.
+List labels show the resolved destination rather than a draft setting.
+
+Previews use two private decks and a conductor and never stop Studio, Automix or Live decks.
+Headphone previews are added after CUE/MIX and before PHONES and headphone protection.
+Main output previews use an isolated third bus, summed only in the device callback after
+the master recording tap, before physical-output limiting. The final limiter's latency is
+included in separate-device alignment estimates. PHONES controls either preview destination,
+independently of MASTER. Main output previews are audible to the audience; deck CUE is never
+summed into that output. Neither preview destination enters the master recording or offline
+project exports.
+
+These settings apply to Library, Studio Playlist and Mashups, Add tracks, and the Live browser
+and Automix queue. Leaving the source screen/list stops its preview. Track previews start
+at the first analysed drop, otherwise a third into the track, at native tempo and key.
 
 ## Live headphone monitoring
 

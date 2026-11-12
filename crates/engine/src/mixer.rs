@@ -227,7 +227,6 @@ pub struct Mixer {
     pub limiter: crate::dsp::Limiter,
     master_meter: Meter,
     pub headphone_mix: f32,
-    pub shared_output: bool,
     pub headphone_gain_db: f32,
     hp_meter: Meter,
     pub auto_gain: bool,
@@ -235,8 +234,9 @@ pub struct Mixer {
     /// Extra signal added to the master before its gain and limiter (sample lanes), `n` frames.
     pub extra: Vec<f32>,
     pub extra_on: bool,
-    /// Independent preview, inserted before master gain or after Cue/Master blending.
+    /// Independent preview, routed after Cue/Master blending or to the physical output.
     pub preview: Vec<f32>,
+    pub speaker_preview: Vec<f32>,
     pub preview_output: crate::command::PreviewOutput,
 
     /// One channel strip per sample lane, driven by its clips' curves.
@@ -260,7 +260,6 @@ impl Mixer {
             limiter: crate::dsp::Limiter::new(sr),
             master_meter: Meter::new(sr),
             headphone_mix: 0.0,
-            shared_output: false,
             headphone_gain_db: 0.0,
             hp_meter: Meter::new(sr),
             auto_gain: true,
@@ -268,6 +267,7 @@ impl Mixer {
             extra: vec![0.0; MAX_BLOCK * 2],
             extra_on: false,
             preview: vec![0.0; MAX_BLOCK * 2],
+            speaker_preview: vec![0.0; MAX_BLOCK * 2],
             preview_output: Default::default(),
             sample_channels: (0..clubcraft_core::SAMPLE_LANES).map(|_| Channel::new(sr)).collect(),
             sample_bufs: (0..clubcraft_core::SAMPLE_LANES).map(|_| vec![0.0; MAX_BLOCK * 2]).collect(),
@@ -330,9 +330,6 @@ impl Mixer {
         self.process_channels(decks, ctxs, active, n, master, cue);
         let master = &mut master[..n * 2];
         let cue = &mut cue[..n * 2];
-        if !self.shared_output && self.preview_output == crate::command::PreviewOutput::Master {
-            for (m, p) in master.iter_mut().zip(&self.preview[..n * 2]) { *m += *p; }
-        }
         self.master_gain.set(db_to_gain(self.master_gain_db));
         for f in master.as_chunks_mut::<2>().0 {
             let g = self.master_gain.next();
@@ -342,10 +339,11 @@ impl Mixer {
         self.limiter.process(master);
         self.master_meter.process(master);
         // Only the Cue/Master control determines master monitoring, even with no PFL selected.
-        let mix = if self.shared_output { 0.0 } else { self.headphone_mix.clamp(0.0, 1.0) };
+        let mix = self.headphone_mix.clamp(0.0, 1.0);
         let hg = db_to_gain(self.headphone_gain_db);
-        for ((c, m), p) in cue.iter_mut().zip(master.iter()).zip(&self.preview[..n * 2]) {
-            let preview = if self.shared_output || self.preview_output == crate::command::PreviewOutput::Headphones { *p } else { 0.0 };
+        for (((c, m), p), speaker) in cue.iter_mut().zip(master.iter()).zip(&self.preview[..n * 2]).zip(&mut self.speaker_preview[..n * 2]) {
+            let preview = if self.preview_output == crate::command::PreviewOutput::Headphones { *p } else { 0.0 };
+            *speaker = if self.preview_output == crate::command::PreviewOutput::Master { soft_clip(*p * hg) } else { 0.0 };
             *c = soft_clip((*c * (1.0 - mix) + *m * mix + preview) * hg);
         }
         self.hp_meter.process(cue);
@@ -390,24 +388,6 @@ mod tests {
         mixer.channels[0].pfl = false;
         let (_, cue) = render(&mut mixer);
         assert!(cue.iter().all(|v| *v == 0.0));
-    }
-
-    #[test]
-    fn shared_output_never_duplicates_master_and_keeps_pfl_independent() {
-        let mut mixer = Mixer::new(44100.0, 1);
-        mixer.shared_output = true;
-        for blend in [0.0, 0.5, 1.0] {
-            mixer.headphone_mix = blend;
-            let (master, cue) = render(&mut mixer);
-            assert!(master.iter().any(|v| v.abs() > 0.01));
-            assert!(cue.iter().all(|v| *v == 0.0));
-        }
-        mixer.channels[0].fader = 0.0;
-        for _ in 0..20 { render(&mut mixer); }
-        mixer.channels[0].pfl = true;
-        let (master, cue) = render(&mut mixer);
-        assert!(master.iter().all(|v| v.abs() < 1e-6));
-        assert!(cue.iter().any(|v| v.abs() > 0.01));
     }
 
     #[test]

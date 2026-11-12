@@ -381,6 +381,7 @@ pub struct LiveEngine {
     pub live_player: Option<MixPlayer>,
     /// Independent browser/mashup preview (private decks, separate transport).
     pub preview_player: Option<MixPlayer>,
+    pub preview_output: clubcraft_engine::command::PreviewOutput,
     pub loading_mix: Option<u64>,
     pub export: Option<Export>,
     pub automix_queue: Vec<TrackId>,
@@ -526,6 +527,7 @@ impl LiveEngine {
             studio_player: None,
             live_player: None,
             preview_player: None,
+            preview_output: clubcraft_engine::command::PreviewOutput::Headphones,
             loading_mix: None,
             export: None,
             automix_queue: Vec::new(),
@@ -580,14 +582,11 @@ impl LiveEngine {
 
     /// Play a browser/mashup preview on its private decks from `from` seconds.
     pub fn play_preview(&mut self, mix: &Mix, from: f64, sh: &Shared) -> Result<()> {
-        use clubcraft_engine::command::PreviewOutput;
         use clubcraft_engine::player::PreviewSink;
-        let output = self.prefs.preview_output;
         let h = self.handle.as_ref().context("Audio output is unavailable")?;
-        if output == PreviewOutput::Headphones && !crate::preview::headphones_available(&h.stream_info()) {
-            anyhow::bail!("Headphone output is unavailable. Configure Audio output in Settings.");
-        }
+        let output = crate::preview::resolve_output(self.prefs.preview_output, &h.audio_config(), &h.stream_info())?;
         self.stop_preview();
+        self.preview_output = output;
         let mut p = MixPlayer::lazy(mix, &|id| {
             let mut a = sh.analyses.get(&id).cloned().unwrap_or_default();
             if a.duration <= 0.0 { a.duration = sh.track(id).map(|t| t.duration).unwrap_or(0.0); }
@@ -602,7 +601,7 @@ impl LiveEngine {
 
     pub fn stop_preview(&mut self) {
         if let (Some(mut p), Some(h)) = (self.preview_player.take(), self.handle.as_mut()) {
-            let _ = p.stop(&mut clubcraft_engine::player::PreviewSink { sink: h, output: self.prefs.preview_output });
+            let _ = p.stop(&mut clubcraft_engine::player::PreviewSink { sink: h, output: self.preview_output });
         }
     }
 
@@ -728,12 +727,12 @@ impl LiveEngine {
             }
         }
         let mut stop_preview = false;
-        let output = self.prefs.preview_output;
+        let output = self.preview_output;
         if let (Some(p), Some(h)) = (self.preview_player.as_mut(), self.handle.as_mut()) {
             let mut preview_state = st;
             preview_state.mix = st.preview;
-            if output == clubcraft_engine::command::PreviewOutput::Headphones && !crate::preview::headphones_available(&h.stream_info()) {
-                messages.push("Headphone output is unavailable; preview stopped".into());
+            if !crate::preview::output_available(output, &h.stream_info()) {
+                messages.push(format!("{} is unavailable; preview stopped", output.label()));
                 stop_preview = true;
             } else if st.preview.schedule_id == p.schedule_id() && st.preview.finished {
                 stop_preview = true;
@@ -1028,7 +1027,7 @@ pub fn mixer_ui(st: &EngineState, eng: &LiveEngine) -> MixerUi {
         crossfader: st.master.crossfader * 2.0 - 1.0,
         master: db_knob(st.master.gain_db, 0.8),
         headphone_mix: st.master.headphone_mix,
-        shared_output: eng.handle.as_ref().is_some_and(|h| h.audio_config().headphones == clubcraft_engine::HeadphoneRouting::MainOutput),
+        cue_available: eng.handle.as_ref().is_some_and(|h| h.stream_info().cue_channels.is_some()),
         headphone_vol: db_knob(st.master.headphone_gain_db, 0.7),
         master_vu: st.master.level.peak,
         recording: st.recording.active,

@@ -109,10 +109,6 @@ impl EngineCore {
 
     /// Change the output rate. Rebuilds the mixer and FX (allocates) — not for the audio thread.
     /// Deck state (tracks, positions, cues, loops) is preserved.
-    pub fn set_shared_output(&mut self, shared: bool) {
-        self.mixer.shared_output = shared;
-    }
-
     pub fn set_sample_rate(&mut self, sr: u32) {
         if sr == self.sr {
             return;
@@ -136,7 +132,6 @@ impl EngineCore {
         self.mixer.headphone_gain_db = old.headphone_gain_db;
         self.mixer.auto_gain = old.auto_gain;
         self.mixer.preview_output = old.preview_output;
-        self.mixer.shared_output = old.shared_output;
         self.mixer.limiter.enabled = old.limiter.enabled;
         self.mixer.limiter.set_ceiling_db(crate::dsp::gain_to_db(old.limiter.ceiling()));
         for d in self.decks.iter_mut() {
@@ -620,6 +615,12 @@ impl EngineCore {
     /// Render `master.len() / 2` frames. `master` and `cue` are interleaved stereo of equal
     /// length (`cue` = headphone bus).
     pub fn process(&mut self, master: &mut [f32], cue: &mut [f32]) {
+        self.process_outputs(master, cue, &mut []);
+    }
+
+    /// Render the recorded master, headphone cue and isolated speaker preview buses.
+    /// Only the device callback sums the third bus into the physical main output.
+    pub fn process_outputs(&mut self, master: &mut [f32], cue: &mut [f32], preview: &mut [f32]) {
         let frames = master.len() / 2;
         let mut done = 0;
         while done < frames {
@@ -628,6 +629,9 @@ impl EngineCore {
             master[done * 2..(done + n) * 2].copy_from_slice(&self.master_buf[..n * 2]);
             if cue.len() >= (done + n) * 2 {
                 cue[done * 2..(done + n) * 2].copy_from_slice(&self.cue_buf[..n * 2]);
+            }
+            if preview.len() >= (done + n) * 2 {
+                preview[done * 2..(done + n) * 2].copy_from_slice(&self.mixer.speaker_preview[..n * 2]);
             }
             done += n;
         }
