@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Compact Play/Stop control shared by browser preview lists.
 pub const PREVIEW_BUTTON_SIZE: f32 = 18.0;
+pub const PREVIEW_CONFIRM_WIDTH: f32 = 380.0;
 
 pub const BG: Color32 = Color32::from_rgb(14, 15, 18);
 pub const PANEL: Color32 = Color32::from_rgb(24, 26, 31);

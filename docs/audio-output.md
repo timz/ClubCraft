@@ -142,8 +142,16 @@ Headphone previews are added after CUE/MIX and before PHONES and headphone prote
 Main output previews use an isolated third bus, summed only in the device callback after
 the master recording tap, before physical-output limiting. The final limiter's latency is
 included in separate-device alignment estimates. PHONES controls either preview destination,
-independently of MASTER. Main output previews are audible to the audience; deck CUE is never
-summed into that output. Neither preview destination enters the master recording or offline
+independently of MASTER. The final physical-output limiter follows the master limiter's
+on/off state and ceiling, including changes during playback. Disabling limiting preserves
+the existing digital safety clamp and fixed processing latency.
+
+Main output previews are audible to the audience; deck CUE is never summed into that output.
+The resolved main output is highlighted even when selected by Auto. Starting a speaker preview
+while a deck, Studio mix or Automix is playing (or a mix is loading) requires confirmation for
+that request. Cancel, Escape or dismissing the dialog leaves playback unchanged. Leaving its
+source or changing the output invalidates the request. Confirmation is not remembered for
+another track or destination. Neither preview destination enters the master recording or offline
 project exports.
 
 These settings apply to Library, Studio Playlist and Mashups, Add tracks, and the Live browser
@@ -158,3 +166,12 @@ CUE end, headphones are silent when all deck headphone buttons are off (unless a
 headphone preview is playing). Master monitoring is enabled only by turning CUE/MIX towards
 MIX; it is never substituted automatically when no deck is selected. PHONES controls the
 combined headphone volume.
+
+## Preview CPU budget
+
+`cargo test -p clubcraft-engine --test engine cpu_budget_4_decks_plus_2_mashup_preview_decks -j 4 -- --nocapture`
+measures ten seconds of four live decks with keylock, stems and FX while two private preview
+decks play a stem mashup throughout the overlap. It reports first-block, p99, p99.9 and worst
+block times. Release builds on Unix enforce a thread-CPU realtime factor below 0.4; Windows
+reports elapsed timing without a machine-load-dependent hard threshold. Run these memory-heavy
+tests one at a time. No output device is opened.

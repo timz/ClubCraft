@@ -155,6 +155,7 @@ pub struct App {
     full_stems_queued: std::collections::HashSet<TrackId>,
     /// Export waiting for stem separation.
     pending_export: Option<PendingExport>,
+    pending_speaker_preview: Option<crate::preview::PendingSpeakerPreview>,
     /// Last seen change from `clubcraft mcp` (marker mtime) and when it was checked.
     external: (Option<std::time::SystemTime>, f64),
     queued: std::collections::HashSet<TrackId>,
@@ -189,7 +190,7 @@ impl App {
         }
         let audio_cfg: clubcraft_engine::AudioConfig = cc.storage.and_then(|s| eframe::get_value(s, "audio")).unwrap_or_default();
         let midi_port: Option<String> = cc.storage.and_then(|s| eframe::get_value(s, "midi_port"));
-        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), preview_serial: 0, stems_queued: Default::default(), full_stems_queued: Default::default(), pending_export: None, queued: Default::default(), external: (std::fs::metadata(crate::mcp::change_marker()).and_then(|m| m.modified()).ok(), 0.0) };
+        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), preview_serial: 0, stems_queued: Default::default(), full_stems_queued: Default::default(), pending_export: None, pending_speaker_preview: None, queued: Default::default(), external: (std::fs::metadata(crate::mcp::change_marker()).and_then(|m| m.modified()).ok(), 0.0) };
         if let Some(config) = &app.eng.startup_audio_config { app.settings.sync_audio(config.clone()); }
         app.settings.connect_midi(app.eng.handle.as_ref());
         if let Some(e) = &app.eng.error {
@@ -669,7 +670,25 @@ impl App {
     }
 
     fn start_preview(&mut self, mix: &clubcraft_core::Mix, from: f64, item: crate::preview::PreviewItem) {
-        match self.eng.play_preview(mix, from, &self.sh) {
+        let Some(h) = self.eng.handle.as_ref() else { self.status = "Audio output is unavailable".into(); return; };
+        let config = h.audio_config();
+        let output = match crate::preview::resolve_output(self.prefs.preview_output, &config, &h.stream_info()) {
+            Ok(output) => output,
+            Err(e) => { self.status = format!("Preview: {e:#}"); return; }
+        };
+        if crate::preview::requires_speaker_confirmation(output, &self.eng.state(), self.eng.loading_mix.is_some()) {
+            self.pending_speaker_preview = Some(crate::preview::PendingSpeakerPreview {
+                mix: mix.clone(), from, item, config, preference: self.prefs.preview_output,
+                mix_serial: self.studio.mix_serial, mashup_revision: self.studio.mashup.revision,
+            });
+            return;
+        }
+        self.play_preview_now(mix, from, item, output);
+    }
+
+    fn play_preview_now(&mut self, mix: &clubcraft_core::Mix, from: f64, item: crate::preview::PreviewItem, output: clubcraft_engine::command::PreviewOutput) {
+        self.pending_speaker_preview = None;
+        match self.eng.play_preview(mix, from, &self.sh, output) {
             Ok(()) => {
                 self.sh.preview.output = self.eng.preview_output;
                 self.sh.preview.item = Some(item);
@@ -682,6 +701,7 @@ impl App {
     }
 
     fn stop_preview(&mut self) {
+        self.pending_speaker_preview = None;
         self.eng.stop_preview();
         self.sh.preview.item = None;
     }
@@ -698,20 +718,42 @@ impl App {
         self.start_preview(&mix, from.clamp(0.0, dur.max(0.0)), item);
     }
 
-    fn reconcile_preview(&mut self) {
+    fn preview_source_visible(&self, item: crate::preview::PreviewItem, mix_serial: u64, mashup_revision: u64) -> bool {
         use crate::preview::PreviewSource as P;
-        let Some(item) = self.sh.preview.item else { return; };
         let visible = match item.source {
             P::Library { playlist, mix } => self.view == View::Library && playlist == self.library.playlist && mix == self.library.mix,
             P::LiveBrowser { playlist, mix } => self.view == View::Live && playlist == self.browser.playlist && mix == self.browser.mix,
             P::LiveQueue => self.view == View::Live && self.eng.automix_queue.get(item.row) == Some(&item.track),
             P::Playlist => self.view == View::Studio && self.studio.tab == Some(crate::studio::Tab::Playlist)
                 && self.studio.mix.tracks.get(item.row).is_some_and(|t| t.track_id == item.track),
-            P::Mashups => self.view == View::Studio && self.studio.tab == Some(crate::studio::Tab::Mashups) && self.studio.mashup.open && self.sh.preview.mashup_revision == self.studio.mashup.revision && self.studio.mashup.has_preview_row(item.row, item.track),
+            P::Mashups => self.view == View::Studio && self.studio.tab == Some(crate::studio::Tab::Mashups) && self.studio.mashup.open && mashup_revision == self.studio.mashup.revision && self.studio.mashup.has_preview_row(item.row, item.track),
             P::AddTracks => self.view == View::Studio && self.studio.picker.open,
         };
         let studio = matches!(item.source, P::Playlist | P::Mashups | P::AddTracks);
-        if !visible || (studio && self.sh.preview.mix_serial != self.studio.mix_serial) { self.stop_preview(); }
+        visible && (!studio || mix_serial == self.studio.mix_serial)
+    }
+
+    fn reconcile_preview(&mut self) {
+        if let Some(item) = self.sh.preview.item {
+            if !self.preview_source_visible(item, self.sh.preview.mix_serial, self.sh.preview.mashup_revision) { self.stop_preview(); }
+        }
+        if let Some(pending) = &self.pending_speaker_preview {
+            let unchanged = pending.preference == self.prefs.preview_output
+                && self.eng.handle.as_ref().is_some_and(|h| h.audio_config() == pending.config);
+            if !unchanged || !self.preview_source_visible(pending.item, pending.mix_serial, pending.mashup_revision) {
+                self.pending_speaker_preview = None;
+            }
+        }
+    }
+
+    fn speaker_preview_confirmation(&mut self, ctx: &egui::Context) {
+        if self.pending_speaker_preview.is_none() { return; }
+        let Some(confirm) = crate::preview::speaker_confirmation_ui(ctx) else { return; };
+        let Some(pending) = self.pending_speaker_preview.take() else { return; };
+        if confirm {
+            // Revalidate the destination in the adapter; approval never carries over to another route or item.
+            self.play_preview_now(&pending.mix, pending.from, pending.item, clubcraft_engine::command::PreviewOutput::Master);
+        }
     }
 
     fn handle_mashup_actions(&mut self, actions: Vec<crate::mashup_view::MashupAction>) {
@@ -1497,6 +1539,7 @@ impl eframe::App for App {
         }
         self.apply_prefs(&ctx);
         self.reconcile_preview();
+        self.speaker_preview_confirmation(&ctx);
         for a in sa {
             match a {
                 crate::settings::SettingsAction::ProcessAll => {

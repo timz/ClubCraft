@@ -587,7 +587,7 @@ fn open_stream(
             let n = (frames - done).min(SCRATCH_FRAMES);
             let (m, c) = (&mut side.master[..n * 2], &mut side.cue[..n * 2]);
             side.core.process_outputs(m, c, &mut preview_buffer[..n * 2]);
-            output::mix_speaker_preview(m, &preview_buffer[..n * 2], &mut shared_buffer[..n * 2], &mut shared_limiter);
+            output::mix_speaker_preview(m, &preview_buffer[..n * 2], &mut shared_buffer[..n * 2], &mut shared_limiter, &side.core.mixer().limiter);
             let out = &mut data[done * ch..(done + n) * ch];
             out.fill(0.0);
             for f in 0..n {

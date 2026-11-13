@@ -42,11 +42,9 @@ impl PreviewState {
     }
 
     pub fn label(&self, ui: &mut egui::Ui) {
-        ui.label(
-            egui::RichText::new(format!("Preview: {}", self.output_label()))
-                .small()
-                .color(crate::theme::TEXT_DIM),
-        );
+        let color = if self.output == PreviewOutput::Master { crate::theme::WARN } else { crate::theme::TEXT_DIM };
+        ui.label(egui::RichText::new(format!("Preview: {}", self.output_label())).small().color(color))
+            .on_hover_text(if self.output == PreviewOutput::Master { "Previews are audible through the speakers." } else { "Preview output" });
     }
 
     pub fn button(&self, ui: &mut egui::Ui, item: PreviewItem, enabled: bool) -> egui::Response {
@@ -67,6 +65,36 @@ impl PreviewState {
                 format!("Preview in {} from the first drop", self.output_label())
             })
     }
+}
+
+pub struct PendingSpeakerPreview {
+    pub mix: clubcraft_core::Mix,
+    pub from: f64,
+    pub item: PreviewItem,
+    pub mix_serial: u64,
+    pub mashup_revision: u64,
+    pub config: clubcraft_engine::AudioConfig,
+    pub preference: PreviewOutput,
+}
+
+pub fn requires_speaker_confirmation(output: PreviewOutput, state: &clubcraft_engine::EngineState, main_loading: bool) -> bool {
+    output == PreviewOutput::Master && (main_loading || state.mix.playing || state.decks.iter().any(|d| d.playing))
+}
+
+pub fn speaker_confirmation_ui(ctx: &egui::Context) -> Option<bool> {
+    let response = egui::Modal::new(egui::Id::new("speaker-preview-confirmation"))
+        .frame(egui::Frame::window(&ctx.global_style()).fill(crate::theme::PANEL))
+        .show(ctx, |ui| {
+            ui.set_width(crate::theme::PREVIEW_CONFIRM_WIDTH);
+            ui.heading("Play preview through speakers?");
+            ui.label("The main playback is running. This preview will be audible to the audience.");
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() { return Some(false); }
+                if ui.button("Play through speakers").clicked() { return Some(true); }
+                None
+            }).inner
+        });
+    if response.should_close() { Some(false) } else { response.inner }
 }
 
 /// Auto uses the running endpoint; a configured but failed headphone route is never a speaker fallback.
@@ -184,6 +212,71 @@ mod tests {
             estimated_offset_ms: None,
             master_delay_ms: 0.0,
             cue_delay_ms: 0.0,
+        }
+    }
+
+    #[test]
+    fn speaker_confirmation_covers_live_studio_automix_and_loading_but_not_headphones() {
+        let mut state = clubcraft_engine::EngineState::default();
+        assert!(!requires_speaker_confirmation(PreviewOutput::Master, &state, false));
+        assert!(requires_speaker_confirmation(PreviewOutput::Master, &state, true));
+        state.preview.playing = true;
+        assert!(!requires_speaker_confirmation(PreviewOutput::Master, &state, false));
+        state.mix.playing = true;
+        assert!(requires_speaker_confirmation(PreviewOutput::Master, &state, false));
+        assert!(!requires_speaker_confirmation(PreviewOutput::Headphones, &state, false));
+        state.mix.playing = false;
+        for deck in 0..state.decks.len() {
+            state.decks[deck].playing = true;
+            assert!(requires_speaker_confirmation(PreviewOutput::Master, &state, false));
+            state.decks[deck].playing = false;
+        }
+    }
+
+    #[test]
+    fn speaker_confirmation_does_not_auto_accept_and_escape_cancels() {
+        let ctx = egui::Context::default();
+        let mut decision = None;
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |_| { decision = speaker_confirmation_ui(&ctx); });
+            output.textures_delta.clear();
+            assert_eq!(decision, None);
+        }
+        let input = egui::RawInput { events: vec![egui::Event::Key {
+            key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE,
+        }], ..Default::default() };
+        let mut output = ctx.run_ui(input, |_| { decision = speaker_confirmation_ui(&ctx); });
+        output.textures_delta.clear();
+        assert_eq!(decision, Some(false));
+    }
+
+    #[test]
+    fn speaker_confirmation_requires_the_explicit_play_button() {
+        for (label, expected) in [("Cancel", false), ("Play through speakers", true)] {
+            let ctx = egui::Context::default();
+            let mut decision = None;
+            let mut position = None;
+            let mut frame = |events| {
+                let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))), events, ..Default::default() };
+                let mut output = ctx.run_ui(input, |_| { decision = speaker_confirmation_ui(&ctx); });
+                position = output.shapes.iter().find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => Some(text.pos + text.galley.size() * 0.5),
+                    _ => None,
+                });
+                output.textures_delta.clear();
+                (decision, position)
+            };
+            frame(vec![]);
+            let (decision, position) = frame(vec![]);
+            assert_eq!(decision, None);
+            let pos = position.expect("confirmation button is visible");
+            frame(vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE,
+            }]);
+            let (decision, _) = frame(vec![egui::Event::PointerButton {
+                pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE,
+            }]);
+            assert_eq!(decision, Some(expected));
         }
     }
 

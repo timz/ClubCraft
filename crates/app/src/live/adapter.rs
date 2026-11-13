@@ -581,10 +581,11 @@ impl LiveEngine {
     }
 
     /// Play a browser/mashup preview on its private decks from `from` seconds.
-    pub fn play_preview(&mut self, mix: &Mix, from: f64, sh: &Shared) -> Result<()> {
+    pub fn play_preview(&mut self, mix: &Mix, from: f64, sh: &Shared, expected_output: clubcraft_engine::command::PreviewOutput) -> Result<()> {
         use clubcraft_engine::player::PreviewSink;
         let h = self.handle.as_ref().context("Audio output is unavailable")?;
         let output = crate::preview::resolve_output(self.prefs.preview_output, &h.audio_config(), &h.stream_info())?;
+        if output != expected_output { anyhow::bail!("Preview output changed; try preview again."); }
         self.stop_preview();
         self.preview_output = output;
         let mut p = MixPlayer::lazy(mix, &|id| {

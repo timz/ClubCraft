@@ -364,7 +364,10 @@ impl Settings {
             }
         });
         hint(ui, "Auto uses headphones when configured, otherwise the main output. Deck CUE never goes to the speakers. Previews are never recorded; PHONES controls their volume.");
-        if preview == PreviewOutput::Master { ui.colored_label(theme::WARN, "Main output previews are audible to the audience."); }
+        let resolved = handle.map(|h| crate::preview::target_output(preview, &h.audio_config(), &h.stream_info()));
+        if resolved == Some(PreviewOutput::Master) || preview == PreviewOutput::Master {
+            ui.colored_label(theme::WARN, "Main output previews are audible to the audience. Playback during a set requires confirmation.");
+        }
         if ui.small_button("Rescan devices").clicked() { self.devices = clubcraft_engine::devices().unwrap_or_default(); }
         ui.collapsing("Advanced audio settings", |ui| {
             egui::Grid::new("audio_advanced").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
